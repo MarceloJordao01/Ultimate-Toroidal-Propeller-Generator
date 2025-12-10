@@ -33,13 +33,17 @@ function toroidal_path_spline_3d(
     blade_length,
     leading_edge_blade_width_pct,
     trailing_edge_blade_width_pct,
-    leading_edge_blade_xoffset,
-    trailing_edge_blade_xoffset
+    leading_edge_blade_xoffset_pct,   // <-- agora é % (0–100)
+    trailing_edge_blade_xoffset_pct   // <-- agora é % (0–100)
 ) =
     let(
-        // offset em Y convertido de %
-        leadW = blade_length * (leading_edge_blade_width_pct / 100),
+        // offsets em Y convertidos de %
+        leadW  = blade_length * (leading_edge_blade_width_pct  / 100),
         trailW = blade_length * (trailing_edge_blade_width_pct / 100),
+
+        // offsets em X convertidos de %
+        leadX  = blade_length * (leading_edge_blade_xoffset_pct  / 100),
+        trailX = blade_length * (trailing_edge_blade_xoffset_pct / 100),
 
         // raio do hub
         r  = hub_d * cos(30) / 2,
@@ -47,7 +51,7 @@ function toroidal_path_spline_3d(
         // 5 pontos principais
         A = [ r*cos(60),  r*sin(60),   hub_height/2 ],
 
-        B = [ blade_length * leading_edge_blade_xoffset,
+        B = [ leadX,
               +leadW,
               hub_height/2 ],
 
@@ -55,7 +59,7 @@ function toroidal_path_spline_3d(
               0,
               hub_height/2 ],
 
-        C = [ blade_length * trailing_edge_blade_xoffset,
+        C = [ trailX,
               -trailW,
               hub_height/2 ],
 

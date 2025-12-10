@@ -19,6 +19,6 @@ toroidal_propeller(
     // --- NOVOS PARÂMETROS DE FORMA DO CAMINHO ---
     leading_edge_blade_width = 18,       // agora interpretado como %
     trailing_edge_blade_width = 18,      // agora interpretado como %
-    leading_edge_blade_xoffset = 0.25,   // fração da blade_length
-    trailing_edge_blade_xoffset = 0.25  // fração da blade_length
+    leading_edge_blade_xoffset = 25,   // fração da blade_length
+    trailing_edge_blade_xoffset = 25  // fração da blade_length
 );
