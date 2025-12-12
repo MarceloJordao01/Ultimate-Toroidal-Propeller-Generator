@@ -1,14 +1,80 @@
 // toroidal_propeller.scad
-
-// BOSL2
 include <BOSL2/std.scad>;
 
 eps = 1/128;
 $fn = 100;
 
-// ------------------------------------------------------------
+// ============================================================
+// Helpers
+// ============================================================
+
+// "2412" -> [2,4,1,2]
+function naca_digits_from_string(s) =
+    [ for (i=[0:len(s)-1]) ord(s[i]) - ord("0") ];
+
+function list_get_or_last(L, i, fallback=undef) =
+    (L == undef || len(L)==0) ? fallback :
+    (i < len(L)) ? L[i] : L[len(L)-1];
+
+function lerp(a,b,u) = a + (b-a)*u;
+function lerp2(p,q,u) = [ lerp(p[0],q[0],u), lerp(p[1],q[1],u) ];
+
+// 2D rotation
+function rot2d_pt(p, ang) =
+    let(c=cos(ang), s=sin(ang))
+    [ p[0]*c - p[1]*s, p[0]*s + p[1]*c ];
+
+function rot2d_path(path2d, ang) =
+    [ for (p=path2d) rot2d_pt(p, ang) ];
+
+// 2D -> 3D in XY plane
+function path2d_to3d(path2d) =
+    [ for (p=path2d) [p[0], p[1], 0] ];
+
+// Safe normalize
+function vnorm(v) = norm(v);
+function vunit(v) = (vnorm(v) < 1e-9) ? [0,0,1] : (v / vnorm(v));
+
+// Cross
+function vcross(a,b) = cross(a,b);
+
+// Rotate vector v around axis t by angle deg (Rodrigues). t must be unit.
+function rot_about_axis(v, t, ang) =
+    let(c = cos(ang), s = sin(ang))
+    v*c + vcross(t, v)*s + t*(t*v)*(1-c);   // (t*v) is dot(t,v)
+
+// Build 4x4 transform matrix from basis vectors and origin.
+// Local axes: X=n, Y=b, Z=t, origin=p
+function frame_matrix(p, n, b, t) =
+    [
+        [ n[0], b[0], t[0], p[0] ],
+        [ n[1], b[1], t[1], p[1] ],
+        [ n[2], b[2], t[2], p[2] ],
+        [ 0,    0,    0,    1    ]
+    ];
+
+// Tangent at index i from path list
+function path_tangent(path, i) =
+    let(
+        N = len(path),
+        p0 = (i==0)   ? path[0]   : path[i-1],
+        p1 = (i==N-1) ? path[N-1] : path[i+1]
+    )
+    vunit(p1 - p0);
+
+// Make a stable normal/binormal given tangent and a reference up
+function make_nb_from_tangent(t, up=[0,0,1]) =
+    let(
+        up2 = (abs(t*up) > 0.95) ? [1,0,0] : up,
+        b = vunit(vcross(t, up2)),
+        n = vunit(vcross(b, t))
+    )
+    [n, b];
+
+
+// ============================================================
 // Catmull–Rom 3D
-// ------------------------------------------------------------
+// ============================================================
 function catmull_rom3d(u, P0, P1, P2, P3) =
     let(u2 = u*u, u3 = u2*u)
     [
@@ -25,89 +91,59 @@ function catmull_rom3d(u, P0, P1, P2, P3) =
                (-P0[2] + 3*P1[2] - 3*P2[2] + P3[2]) * u3)
     ];
 
-// ------------------------------------------------------------
-// Spline 3D do toroide – 5 pontos (A,B,M,C,D)
-// com derivadas controladas em A e D via pontos fantasmas
-// angle_A, angle_D em graus definem direção da tangente em XY
-// ------------------------------------------------------------
+
+// ============================================================
+// Spline 3D do path toroidal (A–B–M–C–D)
+// derivadas controladas em A e D via pontos fantasmas
+// ============================================================
 function toroidal_path_spline_3d(
     t,
     hub_d,
     hub_height,
     blade_length,
+    blade_offset,
     leading_edge_blade_width_pct,
     trailing_edge_blade_width_pct,
     leading_edge_blade_xoffset_pct,
     trailing_edge_blade_xoffset_pct,
-    angle_A = 60,   // direção desejada da tangente em A (graus, no plano XY)
-    angle_D = -240   // direção desejada da tangente em D (graus, no plano XY)
-    ) =
+    angle_A = 60,
+    angle_D = -240
+) =
     let(
-        // offsets em Y convertidos de %
         leadW  = blade_length * (leading_edge_blade_width_pct  / 100),
         trailW = blade_length * (trailing_edge_blade_width_pct / 100),
 
-        // offsets em X convertidos de %
         leadX  = blade_length * (leading_edge_blade_xoffset_pct  / 100),
         trailX = blade_length * (trailing_edge_blade_xoffset_pct / 100),
 
-        // raio do hub
-        r  = hub_d * cos(30) / 2,
+        r = hub_d * cos(30) / 2,
 
-        // pontos reais da curva
-        A = [ r*cos(60),  r*sin(60),   hub_height/2 ],
+        A = [ r*cos(60),  r*sin(60),    hub_height/2 + blade_offset/2 ],
+        B = [ leadX,      +leadW,       hub_height/2 ],
+        M = [ blade_length, 0,          hub_height/2 ],
+        C = [ trailX,     -trailW,      hub_height/2 ],
+        D = [ r*cos(60),  r*sin(-60),   hub_height/2 - blade_offset/2 ],
 
-        B = [ leadX,
-              +leadW,
-              hub_height/2 ],
-
-        M = [ blade_length,
-              0,
-              hub_height/2 ],
-
-        C = [ trailX,
-              -trailW,
-              hub_height/2 ],
-
-        D = [ r*cos(60),  r*sin(-60),  hub_height/2 ],
-
-        // comprimentos de escala dos vetores de derivada (pode ajustar)
-        // aqui uso algo da ordem do passo A->B e C->D pra não ficar duro nem frouxo
         scale_A = norm(B - A),
         scale_D = norm(D - C),
 
-        // vetores de derivada desejados em A e D (só XY, Z = 0)
-        Ta = [
-            scale_A * cos(angle_A),
-            scale_A * sin(angle_A),
-            0
-        ],
+        Ta = [ scale_A*cos(angle_A), scale_A*sin(angle_A), 0 ],
+        Td = [ scale_D*cos(angle_D), scale_D*sin(angle_D), 0 ],
 
-        Td = [
-            scale_D * cos(angle_D),
-            scale_D * sin(angle_D),
-            0
-        ],
+        A0 = B - 2*Ta,
+        D3 = C + 2*Td,
 
-        // pontos fantasmas calculados pela condição de derivada
-        // CR'(0) = 0.5*(P2 - P0) = Ta  ->  P0 = P2 - 2*Ta
-        // CR'(1) = 0.5*(P3 - P1) = Td  ->  P3 = P1 + 2*Td
-        A0 = B - 2*Ta,   // usa em torno de A
-        D3 = C + 2*Td,   // usa em torno de D
-
-        // segmentação em 4 pedaços: [A-B], [B-M], [M-C], [C-D]
         segw = 1/4,
         seg =
-            (t < segw)       ? 0 :
-            (t < 2*segw)     ? 1 :
-            (t < 3*segw)     ? 2 : 3,
+            (t < segw)   ? 0 :
+            (t < 2*segw) ? 1 :
+            (t < 3*segw) ? 2 : 3,
 
         u = (seg == 0) ?  t/segw :
-            (seg == 1) ? (t -     segw)/segw :
-            (seg == 2) ? (t - 2 * segw)/segw :
-                         (t - 3 * segw)/segw,
+            (seg == 1) ? (t - segw)/segw :
+            (seg == 2) ? (t - 2*segw)/segw :
+                         (t - 3*segw)/segw,
 
-        // escolhe P0..P3 pra cada segmento usando A0 e D3
         P0 = (seg == 0) ? A0 :
              (seg == 1) ? A  :
              (seg == 2) ? B  : M,
@@ -127,258 +163,252 @@ function toroidal_path_spline_3d(
     catmull_rom3d(u, P0, P1, P2, P3);
 
 
-
-// ------------------------------------------------------------
-// gera lista de pontos do path toroidal, com t_start/t_end
-// ------------------------------------------------------------
+// ============================================================
+// Lista de pontos do path toroidal
+// ============================================================
 function toroidal_path_points(
     steps,
     hub_d,
     hub_height,
     blade_length,
+    blade_offset,
     leading_edge_blade_width_pct,
     trailing_edge_blade_width_pct,
     leading_edge_blade_xoffset_pct,
     trailing_edge_blade_xoffset_pct,
     t_start = 0,
     t_end   = 1
-    ) =
-    [
-        for (i = [0 : steps])
-            let(
-                u = i/steps,
-                t = t_start + (t_end - t_start) * u
-            )
-            toroidal_path_spline_3d(
-                t,
-                hub_d,
-                hub_height,
-                blade_length,
-                leading_edge_blade_width_pct,
-                trailing_edge_blade_width_pct,
-                leading_edge_blade_xoffset_pct,
-                trailing_edge_blade_xoffset_pct
-            )
-    ];
+) =
+[
+    for (i = [0:steps])
+        let(
+            u = i/steps,
+            t = t_start + (t_end - t_start) * u
+        )
+        toroidal_path_spline_3d(
+            t,
+            hub_d,
+            hub_height,
+            blade_length,
+            blade_offset,
+            leading_edge_blade_width_pct,
+            trailing_edge_blade_width_pct,
+            leading_edge_blade_xoffset_pct,
+            trailing_edge_blade_xoffset_pct
+        )
+];
 
 
-// ------------------------------------------------------------
-// Geração de perfil NACA 4 dígitos
-// digits = [d1,d2,d3,d4] -> NACA d1 d2 d3 d4  (ex: [2,4,1,2] = 2412)
-// chord fixado em 8 mm para manter dimensão máxima ~8
-// Perfil é espelhado em X (apontando pro lado desejado).
-// ------------------------------------------------------------
-function naca4_path(digits, chord=8, pts=20) =
+// ============================================================
+// Perfil NACA 4 dígitos (2D) - fechado
+// ============================================================
+function naca4_path(digits, chord=8, pts=40) =
     let(
         m = digits[0]/100,
         p = digits[1]/10,
-        t = (digits[2]*10 + digits[3]) / 100,
+        tt = (digits[2]*10 + digits[3]) / 100,
 
-        // upper surface (LE -> TE)
         upper = [
             for (i=[0:pts])
                 let(
                     xc = i/pts,
-                    x  = xc,
-                    yt = 5*t*(
-                          0.2969*sqrt(xc)
-                        - 0.1260*xc
-                        - 0.3516*xc*xc
-                        + 0.2843*xc*xc*xc
-                        - 0.1015*xc*xc*xc*xc
-                    ),
-                    yc = (m==0) ? 0 :
-                         (xc < p ?
-                            m*pow(xc,2)/(p*p) * (2*p - xc) :
-                            m*pow(1-xc,2)/pow(1-p,2) * (1 + 2*p - xc - 2*p)
-                         ),
-                    dyc_dx = (m==0) ? 0 :
-                             (xc < p ?
-                                2*m/p/p*(p - xc) :
-                                2*m/pow(1-p,2)*(p - xc)
-                             ),
-                    theta = atan(dyc_dx),
-                    xu = x - yt*sin(theta),
-                    yu = yc + yt*cos(theta)
+                    yt = 5*tt*(0.2969*sqrt(xc)-0.1260*xc-0.3516*xc*xc
+                              +0.2843*xc*xc*xc-0.1015*xc*xc*xc*xc),
+                    yc = (m==0)?0:(xc<p ? m*xc*xc/(p*p)*(2*p-xc)
+                                       : m*(1-xc)*(1-xc)/((1-p)*(1-p))*(1+2*p-xc-2*p)),
+                    dyc = (m==0)?0:(xc<p ? 2*m/(p*p)*(p-xc)
+                                         : 2*m/((1-p)*(1-p))*(p-xc)),
+                    th = atan(dyc)
                 )
-                [xu*chord, yu*chord]
+                [(xc-yt*sin(th))*chord, (yc+yt*cos(th))*chord]
         ],
 
-        // lower surface (TE -> LE)
         lower = [
             for (i=[pts:-1:0])
                 let(
                     xc = i/pts,
-                    x  = xc,
-                    yt = 5*t*(
-                          0.2969*sqrt(xc)
-                        - 0.1260*xc
-                        - 0.3516*xc*xc
-                        + 0.2843*xc*xc*xc
-                        - 0.1015*xc*xc*xc*xc
-                    ),
-                    yc = (m==0) ? 0 :
-                         (xc < p ?
-                            m*pow(xc,2)/(p*p) * (2*p - xc) :
-                            m*pow(1-xc,2)/pow(1-p,2) * (1 + 2*p - xc - 2*p)
-                         ),
-                    dyc_dx = (m==0) ? 0 :
-                             (xc < p ?
-                                2*m/p/p*(p - xc) :
-                                2*m/pow(1-p,2)*(p - xc)
-                             ),
-                    theta = atan(dyc_dx),
-                    xl = x + yt*sin(theta),
-                    yl = yc - yt*cos(theta)
+                    yt = 5*tt*(0.2969*sqrt(xc)-0.1260*xc-0.3516*xc*xc
+                              +0.2843*xc*xc*xc-0.1015*xc*xc*xc*xc),
+                    yc = (m==0)?0:(xc<p ? m*xc*xc/(p*p)*(2*p-xc)
+                                       : m*(1-xc)*(1-xc)/((1-p)*(1-p))*(1+2*p-xc-2*p)),
+                    dyc = (m==0)?0:(xc<p ? 2*m/(p*p)*(p-xc)
+                                         : 2*m/((1-p)*(1-p))*(p-xc)),
+                    th = atan(dyc)
                 )
-                [xl*chord, yl*chord]
+                [(xc+yt*sin(th))*chord, (yc-yt*cos(th))*chord]
         ],
 
-        poly_raw = concat(upper, lower),
-
-        // move origem para 25% da corda na linha média
-        poly_shifted = [
-            for (p = poly_raw)
-                [p[0] - 0.25*chord, p[1]]
-        ],
-
-        // espelha em X pra inverter a direção
-        poly_flipped = [
-            for (p = poly_shifted)
-                [-p[0], p[1]]
-        ]
+        closed = concat(upper, lower)
     )
-    poly_flipped;
+    [
+        for (pp = closed)
+            [(pp[0]-0.25*chord), pp[1]]
+    ];
 
 
-// ------------------------------------------------------------
-// Asinha NACA varrida ao longo do path toroidal (BOSL2 path_sweep)
-// path_portion = 0.25 -> só 25% do caminho (debug)
-// extra_twist_deg corrige a orientação da ponta
-// ------------------------------------------------------------
-module toroidal_wing_naca(
+// ============================================================
+// Asa NACA ao longo do path usando SKIN
+// ============================================================
+module toroidal_wing_naca_skin(
     hub_d,
     hub_height,
     blade_length,
-    // parâmetros da spline
+    blade_offset,
     leading_edge_blade_width_pct,
     trailing_edge_blade_width_pct,
     leading_edge_blade_xoffset_pct,
     trailing_edge_blade_xoffset_pct,
 
-    // parâmetros do perfil
-    naca_digits = [2,4,1,2],   // NACA 2412 por padrão
-    chord       = 8,           // corda fixa em 8 mm
-    naca_pts    = 80,          // resolução do perfil
-    path_steps  = 64,          // resolução do caminho
-    path_portion = 0.25,       // fração do caminho (0–1)
-    extra_twist_deg = -180     // correção de twist pra ponta
-    ){
-    // perfil NACA em 2D (XY)
-    profile = naca4_path(naca_digits, chord=chord, pts=naca_pts);
+    naca_profiles,     // usa 0 e 1
+    chords,            // usa 0 e 1
+    attack_angles,     // usa 0 e 1
+    chord_pivot_pcts,
 
-    // caminho 3D do toroide, só até path_portion
-    path = toroidal_path_points(
-        steps = path_steps,
-        hub_d = hub_d,
-        hub_height = hub_height,
-        blade_length = blade_length,
-        leading_edge_blade_width_pct = leading_edge_blade_width_pct,
-        trailing_edge_blade_width_pct = trailing_edge_blade_width_pct,
-        leading_edge_blade_xoffset_pct = leading_edge_blade_xoffset_pct,
-        trailing_edge_blade_xoffset_pct = trailing_edge_blade_xoffset_pct,
-        t_start = 0,
-        t_end   = path_portion
-    );
+    naca_pts,
+    path_steps,
+    path_portion,
+    extra_twist_deg
+){
+    if (naca_profiles == undef || len(naca_profiles) < 2) {
+        echo("ERRO: naca_profiles precisa ter pelo menos 2 termos.");
+    } else {
 
-    // varre o perfil ao longo desse pedaço do path
-    path_sweep(
-        shape = profile,
-        path  = path,
-        caps  = true,
-        twist = extra_twist_deg
-    );
+        path = toroidal_path_points(
+            path_steps,
+            hub_d,
+            hub_height,
+            blade_length,
+            blade_offset,
+            leading_edge_blade_width_pct,
+            trailing_edge_blade_width_pct,
+            leading_edge_blade_xoffset_pct,
+            trailing_edge_blade_xoffset_pct,
+            0,
+            path_portion
+        );
+
+        digits0 = naca_digits_from_string(naca_profiles[0]);
+        digits1 = naca_digits_from_string(naca_profiles[1]);
+
+        chord0 = list_get_or_last(chords, 0, 4);
+        chord1 = list_get_or_last(chords, 1, chord0);
+
+        atk0   = list_get_or_last(attack_angles, 0, 0);
+        atk1   = list_get_or_last(attack_angles, 1, atk0);
+
+        pivot0 = list_get_or_last(chord_pivot_pcts, 0, 25) / 100;
+        pivot1 = list_get_or_last(chord_pivot_pcts, 1, pivot0*100) / 100;   
+
+        prof0_base = naca4_path(digits0, chord0, naca_pts);
+        prof1_base = naca4_path(digits1, chord1, naca_pts);
+
+        sections =
+        [
+            for (i=[0:len(path)-1])
+                let(
+                    u = (len(path)==1) ? 0 : i/(len(path)-1),
+
+                    chord_u = lerp(chord0, chord1, u),
+                    atk_u   = lerp(atk0,   atk1,   u),
+
+                    s0 = (chord0==0) ? 1 : (chord_u/chord0),
+                    s1 = (chord1==0) ? 1 : (chord_u/chord1),
+
+                    p0 = [ for (p=prof0_base) [p[0]*s0, p[1]*s0] ],
+                    p1 = [ for (p=prof1_base) [p[0]*s1, p[1]*s1] ],
+
+                    prof_u = [ for (k=[0:len(p0)-1]) lerp2(p0[k], p1[k], u) ],
+
+                    pivot_u = lerp(pivot0, pivot1, u),
+                    dx = (pivot_u - 0.25) * chord_u,
+                    prof_u_pivot = [ for (p=prof_u) [p[0] + dx, p[1]] ],
+                    prof_u_rot = rot2d_path(prof_u_pivot, atk_u + 90),
+
+                    t = path_tangent(path, i),
+                    nb = make_nb_from_tangent(t, [0,0,1]),
+                    n0 = nb[0],
+                    b0 = nb[1],
+
+                    tw = u * extra_twist_deg,
+                    n = rot_about_axis(n0, t, tw),
+                    b = rot_about_axis(b0, t, tw),
+
+                    T = frame_matrix(path[i], n, b, t),
+
+                    sec3d = apply(T, path2d_to3d(prof_u_rot))
+                )
+                sec3d
+        ];
+
+        // >>> CORREÇÃO PARA SUA VERSÃO DO BOSL2:
+        skin(sections, slices=1, caps=true);
+    }
 }
 
 
-// ------------------------------------------------------------
+// ============================================================
 // Módulo principal
-// ------------------------------------------------------------
+// ============================================================
 module toroidal_propeller(
     blades = 3,
-    height = 6,
     blade_length = 68,
-    blade_width = 42,      // não liga direto na corda (corda fixa em 8)
-    blade_thickness = 4,
-    blade_hole_offset = 1.4,
-    blade_attack_angle = 35,
     blade_offset = -6,
-    blade_safe_direction = "PREV",
+
     hub_height = 6,
     hub_d = 16,
     hub_screw_d = 5.5,
     hub_notch_height = 0,
     hub_notch_d = 0,
 
-    // parâmetros do path (percentuais e offsets em %)
-    leading_edge_blade_width = 18,      // % da blade_length em Y
-    trailing_edge_blade_width = 18,     // % da blade_length em Y
-    leading_edge_blade_xoffset = 25,    // % da blade_length em X
-    trailing_edge_blade_xoffset = 25,   // % da blade_length em X
+    leading_edge_blade_width = 18,
+    trailing_edge_blade_width = 18,
+    leading_edge_blade_xoffset = 25,
+    trailing_edge_blade_xoffset = 25,
 
-    // --- dois perfis NACA configuráveis ---
-    naca_profile_1 = [2,4,1,2],   // NACA 2412
-    naca_profile_2 = [0,0,1,2],   // NACA 0012
-    use_profile    = 1,           // 1 = usa naca_profile_1, 2 = usa naca_profile_2
+    naca_profiles = ["2412","0012"],
+    chords = [6, 3.5],
+    attack_angles = [8, 2],
+    chord_pivot_pcts = [25, 25],
 
     naca_pts    = 80,
     path_steps  = 64,
-    path_portion = 0.25,          // ainda só 25% do caminho (debug)
-    extra_twist_deg = -180        // correção da ponta (inversão)
-    ){
-    chosen_profile =
-        (use_profile == 1) ? naca_profile_1 :
-        (use_profile == 2) ? naca_profile_2 :
-                             naca_profile_1;
-
+    path_portion = 1.0,
+    extra_twist_deg = -180
+){
     difference() {
         union() {
-            // asas NACA toroidais
-            for (a = [0 : blades - 1])
-                rotate([0,0,a*(360/blades)])
-                    toroidal_wing_naca(
-                        hub_d        = hub_d,
-                        hub_height   = hub_height,
-                        blade_length = blade_length,
+            for (a=[0:blades-1])
+                rotate([0,0,a*360/blades])
+                    toroidal_wing_naca_skin(
+                        hub_d, hub_height,
+                        blade_length, blade_offset,
+                        leading_edge_blade_width,
+                        trailing_edge_blade_width,
+                        leading_edge_blade_xoffset,
+                        trailing_edge_blade_xoffset,
 
-                        leading_edge_blade_width_pct  = leading_edge_blade_width,
-                        trailing_edge_blade_width_pct = trailing_edge_blade_width,
-                        leading_edge_blade_xoffset_pct  = leading_edge_blade_xoffset,
-                        trailing_edge_blade_xoffset_pct = trailing_edge_blade_xoffset,
+                        naca_profiles,
+                        chords,
+                        attack_angles,
+                        chord_pivot_pcts,
 
-                        naca_digits = chosen_profile,
-                        chord       = 4,
-                        naca_pts    = naca_pts,
-                        path_steps  = path_steps,
-                        path_portion = path_portion,
-                        extra_twist_deg = extra_twist_deg
+                        naca_pts,
+                        path_steps,
+                        path_portion,
+                        extra_twist_deg
                     );
 
-            // hub hexagonal
             rotate([0,0,30])
-                cylinder(d = hub_d, h = hub_height, $fn = 6);
+                cylinder(d=hub_d, h=hub_height, $fn=6);
         }
 
-        // furo central
         translate([0,0,-eps])
-            cylinder(d = hub_screw_d, h = hub_height + 2*eps);
+            cylinder(d=hub_screw_d, h=hub_height+2*eps);
 
-        // notch opcional
-        translate([0,0,-eps])
-            cylinder(d = hub_notch_d, h = hub_notch_height + eps);
+        if (hub_notch_height > 0 && hub_notch_d > 0)
+            translate([0,0,-eps])
+                cylinder(d=hub_notch_d, h=hub_notch_height+eps);
     }
 }
 
-
-// chamada default para teste rápido
 toroidal_propeller();
