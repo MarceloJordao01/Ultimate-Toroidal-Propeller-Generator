@@ -25,10 +25,10 @@ function catmull_rom3d(u, P0, P1, P2, P3) =
                (-P0[2] + 3*P1[2] - 3*P2[2] + P3[2]) * u3)
     ];
 
-
 // ------------------------------------------------------------
-// Spline 3D do toroide – passa por 5 pontos
-// leading/trailing xoffset em % (0–100)
+// Spline 3D do toroide – 5 pontos (A,B,M,C,D)
+// com derivadas controladas em A e D via pontos fantasmas
+// angle_A, angle_D em graus definem direção da tangente em XY
 // ------------------------------------------------------------
 function toroidal_path_spline_3d(
     t,
@@ -38,8 +38,10 @@ function toroidal_path_spline_3d(
     leading_edge_blade_width_pct,
     trailing_edge_blade_width_pct,
     leading_edge_blade_xoffset_pct,
-    trailing_edge_blade_xoffset_pct
-) =
+    trailing_edge_blade_xoffset_pct,
+    angle_A = 60,   // direção desejada da tangente em A (graus, no plano XY)
+    angle_D = -240   // direção desejada da tangente em D (graus, no plano XY)
+    ) =
     let(
         // offsets em Y convertidos de %
         leadW  = blade_length * (leading_edge_blade_width_pct  / 100),
@@ -52,7 +54,7 @@ function toroidal_path_spline_3d(
         // raio do hub
         r  = hub_d * cos(30) / 2,
 
-        // 5 pontos principais
+        // pontos reais da curva
         A = [ r*cos(60),  r*sin(60),   hub_height/2 ],
 
         B = [ leadX,
@@ -69,7 +71,31 @@ function toroidal_path_spline_3d(
 
         D = [ r*cos(60),  r*sin(-60),  hub_height/2 ],
 
-        // segmentação
+        // comprimentos de escala dos vetores de derivada (pode ajustar)
+        // aqui uso algo da ordem do passo A->B e C->D pra não ficar duro nem frouxo
+        scale_A = norm(B - A),
+        scale_D = norm(D - C),
+
+        // vetores de derivada desejados em A e D (só XY, Z = 0)
+        Ta = [
+            scale_A * cos(angle_A),
+            scale_A * sin(angle_A),
+            0
+        ],
+
+        Td = [
+            scale_D * cos(angle_D),
+            scale_D * sin(angle_D),
+            0
+        ],
+
+        // pontos fantasmas calculados pela condição de derivada
+        // CR'(0) = 0.5*(P2 - P0) = Ta  ->  P0 = P2 - 2*Ta
+        // CR'(1) = 0.5*(P3 - P1) = Td  ->  P3 = P1 + 2*Td
+        A0 = B - 2*Ta,   // usa em torno de A
+        D3 = C + 2*Td,   // usa em torno de D
+
+        // segmentação em 4 pedaços: [A-B], [B-M], [M-C], [C-D]
         segw = 1/4,
         seg =
             (t < segw)       ? 0 :
@@ -81,19 +107,25 @@ function toroidal_path_spline_3d(
             (seg == 2) ? (t - 2 * segw)/segw :
                          (t - 3 * segw)/segw,
 
-        P = [A, B, M, C, D],
+        // escolhe P0..P3 pra cada segmento usando A0 e D3
+        P0 = (seg == 0) ? A0 :
+             (seg == 1) ? A  :
+             (seg == 2) ? B  : M,
 
-        i0 = (seg == 0) ? 0 : seg-1,
-        i1 = seg,
-        i2 = seg+1,
-        i3 = (seg+2 > 4) ? 4 : seg+2,
+        P1 = (seg == 0) ? A  :
+             (seg == 1) ? B  :
+             (seg == 2) ? M  : C,
 
-        P0 = P[i0],
-        P1 = P[i1],
-        P2 = P[i2],
-        P3 = P[i3]
+        P2 = (seg == 0) ? B  :
+             (seg == 1) ? M  :
+             (seg == 2) ? C  : D,
+
+        P3 = (seg == 0) ? M  :
+             (seg == 1) ? C  :
+             (seg == 2) ? D  : D3
     )
     catmull_rom3d(u, P0, P1, P2, P3);
+
 
 
 // ------------------------------------------------------------
@@ -110,7 +142,7 @@ function toroidal_path_points(
     trailing_edge_blade_xoffset_pct,
     t_start = 0,
     t_end   = 1
-) =
+    ) =
     [
         for (i = [0 : steps])
             let(
@@ -136,7 +168,7 @@ function toroidal_path_points(
 // chord fixado em 8 mm para manter dimensão máxima ~8
 // Perfil é espelhado em X (apontando pro lado desejado).
 // ------------------------------------------------------------
-function naca4_path(digits, chord=8, pts=80) =
+function naca4_path(digits, chord=8, pts=20) =
     let(
         m = digits[0]/100,
         p = digits[1]/10,
@@ -241,7 +273,7 @@ module toroidal_wing_naca(
     path_steps  = 64,          // resolução do caminho
     path_portion = 0.25,       // fração do caminho (0–1)
     extra_twist_deg = -180     // correção de twist pra ponta
-){
+    ){
     // perfil NACA em 2D (XY)
     profile = naca4_path(naca_digits, chord=chord, pts=naca_pts);
 
@@ -303,7 +335,7 @@ module toroidal_propeller(
     path_steps  = 64,
     path_portion = 0.25,          // ainda só 25% do caminho (debug)
     extra_twist_deg = -180        // correção da ponta (inversão)
-){
+    ){
     chosen_profile =
         (use_profile == 1) ? naca_profile_1 :
         (use_profile == 2) ? naca_profile_2 :
@@ -325,7 +357,7 @@ module toroidal_propeller(
                         trailing_edge_blade_xoffset_pct = trailing_edge_blade_xoffset,
 
                         naca_digits = chosen_profile,
-                        chord       = 8,
+                        chord       = 4,
                         naca_pts    = naca_pts,
                         path_steps  = path_steps,
                         path_portion = path_portion,
