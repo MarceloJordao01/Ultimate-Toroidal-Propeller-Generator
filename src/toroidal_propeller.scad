@@ -18,6 +18,7 @@ function list_get_or_last(L, i, fallback=undef) =
 
 function lerp(a,b,u) = a + (b-a)*u;
 function lerp2(p,q,u) = [ lerp(p[0],q[0],u), lerp(p[1],q[1],u) ];
+function clamp(x,a,b) = (x<a)?a:((x>b)?b:x);
 
 // 2D rotation
 function rot2d_pt(p, ang) =
@@ -34,8 +35,6 @@ function path2d_to3d(path2d) =
 // Safe normalize
 function vnorm(v) = norm(v);
 function vunit(v) = (vnorm(v) < 1e-9) ? [0,0,1] : (v / vnorm(v));
-
-// Cross
 function vcross(a,b) = cross(a,b);
 
 // Rotate vector v around axis t by angle deg (Rodrigues). t must be unit.
@@ -72,6 +71,38 @@ function make_nb_from_tangent(t, up=[0,0,1]) =
     [n, b];
 
 
+// ------------------------------
+// Keyframes along path (percent)
+// ------------------------------
+
+// returns index j such that pcts[j] <= u_pct <= pcts[j+1]
+function kf_seg_index(pcts, u_pct) =
+    let(
+        n = len(pcts),
+        hits = [ for (j=[0:n-2]) if (u_pct >= pcts[j] && u_pct <= pcts[j+1]) j ]
+    )
+    (n < 2) ? 0 :
+    (len(hits) > 0) ? hits[len(hits)-1] :
+    (u_pct < pcts[0]) ? 0 : (n-2);
+
+// local interpolation in that segment
+function kf_local_u(pcts, j, u_pct) =
+    let(a=pcts[j], b=pcts[j+1], d=b-a)
+    (abs(d) < 1e-9) ? 0 : (u_pct - a)/d;
+
+// for profiles: returns [j, v] (segment index + local u)
+function kf_eval_seg(pcts, u_pct, nprofiles) =
+    let(
+        p = (pcts==undef || len(pcts)<2) ? [0,100] : pcts,
+        n = len(p),
+        uu = clamp(u_pct, p[0], p[n-1]),
+        j0 = kf_seg_index(p, uu),
+        j  = clamp(j0, 0, max(0,nprofiles-2)),
+        v  = kf_local_u(p, j0, uu)
+    )
+    [j, v];
+
+
 // ============================================================
 // Catmull–Rom 3D
 // ============================================================
@@ -94,7 +125,6 @@ function catmull_rom3d(u, P0, P1, P2, P3) =
 
 // ============================================================
 // Spline 3D do path toroidal (A–B–M–C–D)
-// derivadas controladas em A e D via pontos fantasmas
 // ============================================================
 function toroidal_path_spline_3d(
     t,
@@ -201,8 +231,10 @@ function toroidal_path_points(
 
 // ============================================================
 // Perfil NACA 4 dígitos (2D) - fechado
+// (retorna pivô em 0.25c no X=0)
+// >>> ALTERADO: removido o sinal "-"
 // ============================================================
-function naca4_path(digits, chord=8, pts=40) =
+function naca4_path(digits, chord=1, pts=40) =
     let(
         m = digits[0]/100,
         p = digits[1]/10,
@@ -242,14 +274,15 @@ function naca4_path(digits, chord=8, pts=40) =
     )
     [
         for (pp = closed)
-            [(pp[0]-0.25*chord), pp[1]]
+            [(pp[0] - 0.25*chord), pp[1]]
     ];
 
 
 // ============================================================
-// Asa NACA ao longo do path usando SKIN
+// Asa NACA ao longo do path usando SKIN (keyframes por %)
+// >>> APENAS profile_pcts é o eixo mestre
 // ============================================================
-module toroidal_wing_naca_skin(
+module toroidal_wing_naca_skin_keyed(
     hub_d,
     hub_height,
     blade_length,
@@ -259,20 +292,26 @@ module toroidal_wing_naca_skin(
     leading_edge_blade_xoffset_pct,
     trailing_edge_blade_xoffset_pct,
 
-    naca_profiles,     // usa 0 e 1
-    chords,            // usa 0 e 1
-    attack_angles,     // usa 0 e 1
-    chord_pivot_pcts,
+    naca_profiles,         // ["2412","8020","2412", ...]
+    profile_pcts,          // [0,30,100, ...] (ideal: mesmo len do naca_profiles)
+
+    chords,                // [6,5,6,...] (mesmo índice do profile_pcts)
+    attack_angles,         // [8,0,2,...]
+    chord_pivot_pcts,      // [25,35,25,...] em %
 
     naca_pts,
     path_steps,
     path_portion,
-    extra_twist_deg
+    extra_twist_deg,
+    attack_zero_offset = 90
 ){
-    if (naca_profiles == undef || len(naca_profiles) < 2) {
-        echo("ERRO: naca_profiles precisa ter pelo menos 2 termos.");
+    np = (naca_profiles==undef) ? 0 : len(naca_profiles);
+
+    if (np < 2) {
+        echo("ERRO: naca_profiles precisa ter >= 2.");
     } else {
 
+        // Path
         path = toroidal_path_points(
             path_steps,
             hub_d,
@@ -287,60 +326,70 @@ module toroidal_wing_naca_skin(
             path_portion
         );
 
-        digits0 = naca_digits_from_string(naca_profiles[0]);
-        digits1 = naca_digits_from_string(naca_profiles[1]);
-
-        chord0 = list_get_or_last(chords, 0, 4);
-        chord1 = list_get_or_last(chords, 1, chord0);
-
-        atk0   = list_get_or_last(attack_angles, 0, 0);
-        atk1   = list_get_or_last(attack_angles, 1, atk0);
-
-        pivot0 = list_get_or_last(chord_pivot_pcts, 0, 25) / 100;
-        pivot1 = list_get_or_last(chord_pivot_pcts, 1, pivot0*100) / 100;   
-
-        prof0_base = naca4_path(digits0, chord0, naca_pts);
-        prof1_base = naca4_path(digits1, chord1, naca_pts);
+        // Unit-chord profile for each keyframe NACA
+        unit_profiles =
+        [
+            for (k=[0:np-1])
+                let(dig = naca_digits_from_string(naca_profiles[k]))
+                naca4_path(dig, 1, naca_pts)
+        ];
 
         sections =
         [
             for (i=[0:len(path)-1])
                 let(
                     u = (len(path)==1) ? 0 : i/(len(path)-1),
+                    u_pct = 100*u,
 
-                    chord_u = lerp(chord0, chord1, u),
-                    atk_u   = lerp(atk0,   atk1,   u),
+                    // find segment in profile_pcts
+                    seg = kf_eval_seg(profile_pcts, u_pct, np),
+                    j = seg[0],
+                    v = seg[1],
 
-                    s0 = (chord0==0) ? 1 : (chord_u/chord0),
-                    s1 = (chord1==0) ? 1 : (chord_u/chord1),
+                    // all scalars follow the same segment j->j+1 using v
+                    chord0 = list_get_or_last(chords, j, 6),
+                    chord1 = list_get_or_last(chords, j+1, chord0),
+                    chord_u = lerp(chord0, chord1, v),
 
-                    p0 = [ for (p=prof0_base) [p[0]*s0, p[1]*s0] ],
-                    p1 = [ for (p=prof1_base) [p[0]*s1, p[1]*s1] ],
+                    atk0 = list_get_or_last(attack_angles, j, 0),
+                    atk1 = list_get_or_last(attack_angles, j+1, atk0),
+                    atk_u = lerp(atk0, atk1, v),
 
-                    prof_u = [ for (k=[0:len(p0)-1]) lerp2(p0[k], p1[k], u) ],
+                    piv0 = list_get_or_last(chord_pivot_pcts, j, 25) / 100,
+                    piv1 = list_get_or_last(chord_pivot_pcts, j+1, piv0*100) / 100,
+                    piv_u = lerp(piv0, piv1, v),
 
-                    pivot_u = lerp(pivot0, pivot1, u),
-                    dx = (pivot_u - 0.25) * chord_u,
-                    prof_u_pivot = [ for (p=prof_u) [p[0] + dx, p[1]] ],
-                    prof_u_rot = rot2d_path(prof_u_pivot, atk_u + 90),
+                    // scale both unit profiles by chord_u then interpolate shape
+                    p0 = [ for (p=unit_profiles[j])   [p[0]*chord_u, p[1]*chord_u] ],
+                    p1 = [ for (p=unit_profiles[j+1]) [p[0]*chord_u, p[1]*chord_u] ],
+                    prof_u = [ for (k=[0:len(p0)-1]) lerp2(p0[k], p1[k], v) ],
 
+                    // pivot shift (unit profile is centered at 0.25c)
+                    dx = (piv_u - 0.25) * chord_u,
+                    prof_piv = [ for (p=prof_u) [p[0] + dx, p[1]] ],
+
+                    // attack
+                    prof_rot = rot2d_path(prof_piv, atk_u + attack_zero_offset),
+
+                    // frame from path tangent
                     t = path_tangent(path, i),
                     nb = make_nb_from_tangent(t, [0,0,1]),
                     n0 = nb[0],
                     b0 = nb[1],
 
+                    // extra twist distributed along the whole path
                     tw = u * extra_twist_deg,
                     n = rot_about_axis(n0, t, tw),
                     b = rot_about_axis(b0, t, tw),
 
                     T = frame_matrix(path[i], n, b, t),
 
-                    sec3d = apply(T, path2d_to3d(prof_u_rot))
+                    sec3d = apply(T, path2d_to3d(prof_rot))
                 )
                 sec3d
         ];
 
-        // >>> CORREÇÃO PARA SUA VERSÃO DO BOSL2:
+        // BOSL2 version: slices (int) required
         skin(sections, slices=1, caps=true);
     }
 }
@@ -365,21 +414,26 @@ module toroidal_propeller(
     leading_edge_blade_xoffset = 25,
     trailing_edge_blade_xoffset = 25,
 
-    naca_profiles = ["2412","0012"],
-    chords = [6, 3.5],
-    attack_angles = [8, 2],
-    chord_pivot_pcts = [25, 25],
+    // KEYFRAMES (todos seguem profile_pcts)
+    naca_profiles = ["2412","8020","2412"],
+    profile_pcts  = [0,30,100],
 
+    chords = [6, 5, 6],
+    attack_angles = [8, 0, 2],
+    chord_pivot_pcts = [25, 35, 25],
+
+    // qualidade
     naca_pts    = 80,
     path_steps  = 64,
     path_portion = 1.0,
-    extra_twist_deg = -180
+    extra_twist_deg = -180,
+    attack_zero_offset = 90
 ){
     difference() {
         union() {
             for (a=[0:blades-1])
                 rotate([0,0,a*360/blades])
-                    toroidal_wing_naca_skin(
+                    toroidal_wing_naca_skin_keyed(
                         hub_d, hub_height,
                         blade_length, blade_offset,
                         leading_edge_blade_width,
@@ -388,6 +442,8 @@ module toroidal_propeller(
                         trailing_edge_blade_xoffset,
 
                         naca_profiles,
+                        profile_pcts,
+
                         chords,
                         attack_angles,
                         chord_pivot_pcts,
@@ -395,7 +451,8 @@ module toroidal_propeller(
                         naca_pts,
                         path_steps,
                         path_portion,
-                        extra_twist_deg
+                        extra_twist_deg,
+                        attack_zero_offset
                     );
 
             rotate([0,0,30])
@@ -411,4 +468,5 @@ module toroidal_propeller(
     }
 }
 
+// default
 toroidal_propeller();
