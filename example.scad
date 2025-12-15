@@ -2,7 +2,7 @@ use <src/toroidal_propeller.scad>
 $fn = 100;                      // how polligonall you want the model
 
 toroidal_propeller(
-    blades = 2,                         // number of blades
+    blades = 1,                         // number of blades
     hub_height = 6,                     // Hub height
     hub_d = 16,                         // hub diameter (círculo que circunscreve o hexágono)
     hub_screw_d = 5.5,                  // hub screw diameter
@@ -15,9 +15,10 @@ toroidal_propeller(
     leading_edge_blade_xoffset = 50,    // distancia R1x do path do toroide, porcentagem do valor de blade_length/2
     trailing_edge_blade_xoffset = 60,   // distancia R2x do path do toroide, porcentagem do valor de blade_length/2
     // perfis NACA:
-    naca_profiles=["2412","8020","0012","2412"],      // perfil inicial e final por enquanto
-    profile_pcts=[0,20,50,100],                  // tamanho das chords
-    chords=[6,10,3,6],
-    attack_angles=[20,40,0,-10],            // angulo de ataque
+    profiles=["8412",["ellipse", 0.5],"2412"],      // perfil inicial e final por enquanto
+    profile_pcts=[0,50,100],                  // tamanho das chords
+    chords=[8,2,6],
+    chord_pivot_pcts = [0,0,0],
+    attack_angles=[15,0,-10],            // angulo de ataque
     path_portion = 1.0
 );
